@@ -1,0 +1,1049 @@
+## Setting up R Environment
+
+### Setup
+```{r setup}
+options(scipen=999)
+set.seed(42)
+```
+
+
+### Load Packages
+
+```{r load packages}
+library(Seurat) 
+library(ggplot2)
+library(dplyr)
+library(cowplot)
+library(data.table)
+library(glmGamPoi)
+library(patchwork)
+library("DoubletFinder") 
+```
+
+#Path were files are kept
+```{r}
+setwd("YOUR PATH")
+```
+
+#Load Matrix, cell metadata and genes files for each samples
+```{r}
+data_dir_GMM2 <- ("YOUR PATH")
+counts_GMM2 <- ReadParseBio(data_dir_GMM2)
+cell_metadata_GMM2 <- read.csv(file.path(data_dir_GMM2, "cell_metadata.csv"), row.names = 1)
+seurat_GMM2 <- CreateSeuratObject(counts = counts_GMM2, min.cells = 3, min.features = 200, meta.data = cell_metadata_GMM2)
+#REPEAT THIS SECTION AS MUCH AS THE NUMBER OF SAMPLES
+
+data_dir_GMM3 <- ("YOUR PATH")
+counts_GMM3 <- ReadParseBio(data_dir_GMM3)
+cell_metadata_GMM3 <- read.csv(file.path(data_dir_GMM3, "cell_metadata.csv"), row.names = 1)
+seurat_GMM3 <- CreateSeuratObject(counts = counts_GMM3, min.cells = 3, min.features = 200, meta.data = cell_metadata_GMM3)
+
+```
+
+
+
+## Generate a list of samples to be used in this analysis
+```{r id list}
+# Make list of ids
+### CHANGE AS APPROPRIATE ###
+ids <- c("GM-M2", "GM-M3")
+```
+
+## Merge samples
+
+```{r merge samples}
+
+SC <- merge(seurat_GMM2, y = c(seurat_GMM3), add.cell.ids = c("GMM2", "GMM3"), project = "CHIN_GLAND")
+
+table(SC$sample)
+```
+
+```{r identify mitochondrial genes}
+## Here are all the mtDNA genes we used for Oryctolagus Cuniculus!!!! (as found in the .gff file for the mtDNA)
+mtgenes <- c("COX1","COX2","ATP8","ATP6","COX3","ND3","ND4L","ND4","ND5","ND6","CYTB","ND1","ND2","ENSOCUG00000029082","ENSOCUG00000029084","ENSOCUG00000029081","ENSOCUG00000029083","ENSOCUG00000029085","ENSOCUG00000029087","ENSOCUG00000029088","ENSOCUG00000029089","ENSOCUG00000029091","ENSOCUG00000029092","ENSOCUG00000029093","ENSOCUG00000029094","ENSOCUG00000029095","ENSOCUG00000029097","ENSOCUG00000029098","ENSOCUG00000029100","ENSOCUG00000029104","ENSOCUG00000029106","ENSOCUG00000029109","ENSOCUG00000029110","ENSOCUG00000029111","ENSOCUG00000029114","ENSOCUG00000029116","ENSOCUG00000029117")
+mtgenesinfeaturelist <- mtgenes[mtgenes %in% SC@assays$RNA@counts@Dimnames[[1]]]
+mtgenesinfeaturelist
+SC[["percent.mt"]] <- PercentageFeatureSet(SC, features = mtgenesinfeaturelist)
+head(SC[["percent.mt"]])
+```
+
+## MtDNA
+
+So we'd like to know how much mtDNA is generally found in each of our cells within each of our samples. This will help inform us as to what the cutoff should be for the maximum amount of mtDNA we will allow in a cell before it is removed.
+
+### Violin Plot visualization of mtDNA percentage
+```{r violin plot of mtDNA}
+# Visualize QC metrics as a violin plot
+VlnPlot(object = SC, features = c("percent.mt"),group.by= "sample",  ncol = 1
+        , pt.size = 0 # set pt.size to 0 to remove the points and just see the violins!
+        ) +
+geom_hline(yintercept = c(5)) # add a horizontal line at 10% mtDNA percentage, can be changed as required
+```
+### Ridgeplot visualization of mtDNA percentage
+```{r ridgeplot of mtDNA}
+RidgePlot(SC, features=c("percent.mt"), group.by = "sample", ncol = 1) + #set ncol to number of plots you want in each row
+geom_vline(xintercept = c(10))
+```
+
+### Distribution of mtDNA percentage by cell rank
+
+```{r distribution of mtDNA by cell rank}
+plot_list_mt = list()
+
+for (i in 1:length(ids)) {
+  datatoplot <- SC[[]] %>% filter (sample == ids[i])
+  pl1 <- data.frame(index=seq.int(1,nrow(datatoplot)),
+                    nFeature_RNA = sort(datatoplot$percent.mt,decreasing=F)) %>%
+    ggplot() +
+    scale_color_manual(values=c("green"), labels=c("percent.mt"), name=NULL) +
+    ggtitle(paste(ids[i], "Raw STARsolo cells",sep=" "), subtitle = "pre-filtered for cells with >= 200 genes, genes in >= 3 cells") + xlab("Barcodes") + ylab("Percentage mtDNA genes (%)") +
+    geom_line(aes(x=index, y=nFeature_RNA, color = "percent.mt"), size=1.25) 
+  plot_list_mt[[i]] = pl1 #add the figure to the list
+}
+
+names(plot_list_mt) <- ids
+
+print(plot_list_mt)
+```
+
+
+### Distribution of mtDNA percentage by cell rank with cutoff plotted
+```{r distribution of mtDNA by cell rank with cutoff plotted}
+
+mt_upper <- 10
+
+cellfiltermtDNA <- geom_hline(yintercept = c(mt_upper), color = "green")
+
+for (i in 1:length(plot_list_mt)) {
+ plot <- plot_list_mt[[i]] + cellfiltermtDNA
+ plot_list_mt[[i]] = plot
+}
+
+print(plot_list_mt)
+
+for (i in 1:length(plot_list_mt)) { # for loop from one to number of samples
+  file_name = paste("mtDNA_distribution_plot_", ids[i], ".tiff", sep="")
+  tiff(file_name)  # start making the .tiff file
+  print(plot_list_mt[[i]]) # print the plot for the particular sample
+  dev.off() # stop making the .tiff file
+}
+```
+
+### Filter Cells by mtDNA percentage
+
+So once you're happy with your filters that you've noted above then we can apply them to your data.
+
+```{r filter cells by mtDNA percentage}
+
+mt_upper <- 10
+SS <- subset(SC, subset = percent.mt < mt_upper)
+table(SS$sample)
+```
+### Filter out mtDNA features
+
+```{r filter features by removing mtDNA}
+counts <- GetAssayData(SC, assay = "RNA")
+nrow(counts)
+counts <- counts[-(which(rownames(counts) %in% mtgenes)),]
+nrow(counts)
+
+# SANITY CHECK:
+length(mtgenesinfeaturelist) + nrow(counts)
+SC <- subset(SC, features = rownames(counts))
+
+
+```
+
+## Filtering based on number of genes (features) and molecules (UMI) per cell
+
+### Violin Plot visualization of features and UMIs
+
+```{r Violin Plot visualization of features and UMIs}
+
+VlnPlot(object = SC, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2
+        , pt.size = 0, group.by = "sample"
+        )
+
+VlnPlot(object = SC, features = c("nFeature_RNA"), group.by = "sample")
+VlnPlot(object = SC, features = c("nCount_RNA"),group.by = "sample")
+```
+
+### Scatterplot visualization of features and UMIs
+```{r Scatterplot visualization of features and UMIs}
+
+scatterplot <- FeatureScatter(SC, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", raster=FALSE, group.by = "sample")
+
+scatterplot
+```
+### Ridgeplot visualization of features and UMIs
+```{r Ridgeplot visualization of features and UMIs}
+RidgePlot(SC, features=c("nFeature_RNA","nCount_RNA"), ncol = 2, group.by = "sample") +
+geom_vline(xintercept = c(5), color = "purple")
+```
+
+### Plot feature and UMI counts per cell by cell rank
+
+```{r Plot feature and UMI counts per cell by cell rank}
+
+plot_list_umiftlog = list()
+
+for (i in 1:length(ids)) {
+
+  xbreaks = c(1,1e1,1e2,1e3,1e4,1e5,1e6) # for our plot we will have breaks along the x axis at the noted values
+  xlabels = c("1","10","100","1000","10k","100K","1M") # we will label these breaks with the noted appropriate values
+  ybreaks = c(1,2,5,10,20,50,100,200,500,1000,2000,5000,10000,20000,50000,100000,200000,500000,1000000) # we will have breaks along the y axis at the noted values
+  ylabels = c("1","2","5","10","2","5","100","2","5","1000","2","5","10k","2","5","100K","2","5","1M") # we will label these breaks with the noted appropriate values
+
+ 
+  datatoplot <- SC[[]] %>% filter (sample == ids[i])
+  
+  pl1 <- data.frame(index=seq.int(1,nrow(datatoplot)), 
+                    nCount_RNA = sort(datatoplot$nCount_RNA,decreasing=T),
+                    nFeature_RNA = sort(datatoplot$nFeature_RNA,decreasing=T)) %>%
+    ggplot() +
+    scale_color_manual(values=c("red2","blue4"), labels=c("Features","UMI"), name=NULL) +
+    ggtitle(paste(ids[i], "Raw STARsolo cells",sep=" "), subtitle = "pre-filtered for cells with >= 200 genes, genes in >= 3 cells") + xlab("Barcodes") + ylab("counts (UMI or Features)") +
+    scale_x_continuous(trans = 'log2', breaks=xbreaks, labels = xlabels) +
+    scale_y_continuous(trans = 'log2', breaks=ybreaks, labels = ylabels) +
+    geom_line(aes(x=index, y=nCount_RNA, color = "UMI"), size=1.75) +
+    geom_line(aes(x=index, y=nFeature_RNA, color = "Features"), size=1.25)
+
+  plot_list_umiftlog[[i]] = pl1 #add the figure to the list
+}
+
+names(plot_list_umiftlog) <- ids
+
+print(plot_list_umiftlog)
+
+
+# We're going to save several plots in a list so generate an empty list
+plot_list_umiftuntransformed = list()
+
+for (i in 1:length(ids)) {
+
+  # Setting up the plot space
+  ybreaks = c(1,2,5,10,20,50,100,200,500,1000,2000,5000,10000,20000,50000,100000,200000,500000,1000000)
+  ylabels = c("1","2","5","10","2","5","100","2","5","1000","2","5","10k","2","5","100K","2","5","1M")
+
+  
+  datatoplot <- SC[[]] %>% filter (sample  == ids[i])
+  pl1 <- data.frame(index=seq.int(1,nrow(datatoplot)),
+                    nCount_RNA = sort(datatoplot$nCount_RNA,decreasing=T),
+                    nFeature_RNA = sort(datatoplot$nFeature_RNA,decreasing=T)) %>%
+    ggplot() + # let's make a ggplot figure
+    scale_color_manual(values=c("red2","blue4"), labels=c("Features","UMI"), name=NULL) +
+     ggtitle(paste(ids[i], "Raw STARsolo cells",sep=" "), subtitle = "pre-filtered for cells with >= 200 genes, genes in >= 3 cells") + xlab("Barcodes") + ylab("counts (UMI or Features)") +
+    scale_y_continuous(trans = 'log2', breaks=ybreaks, labels = ylabels) +
+    geom_line(aes(x=index, y=nCount_RNA, color = "UMI"), size=1.75) +
+    geom_line(aes(x=index, y=nFeature_RNA, color = "Features"), size=1.25)
+
+  plot_list_umiftuntransformed[[i]] = pl1
+}
+
+names(plot_list_umiftuntransformed) <- ids
+
+print(plot_list_umiftuntransformed)
+
+plot_list_umiftuntransformed_first1000 = list()
+
+for (i in 1:length(plot_list_umiftuntransformed)) {
+ plot <- plot_list_umiftuntransformed[[i]] + xlim(0,1000)
+ plot_list_umiftuntransformed_first1000[[i]] = plot
+}
+
+names(plot_list_umiftuntransformed_first1000) <- ids
+
+print(plot_list_umiftuntransformed_first1000)
+```
+
+### Replot feature and UMI counts per cell by cell rank with upper and lower bounds
+
+```{r Replot feature and UMI counts per cell by cell rank with limits}
+
+ids
+
+# Great, now set limits for each of our samples:
+
+UMI_upper <- c(80000, 80000)
+UMI_lower <- c(1000, 1000)
+Feature_upper <- c(7000, 7000)
+Feature_lower <- c(1500, 1750)
+
+plot_list_umiftlog_limits = list()
+
+for (i in 1:length(plot_list_umiftlog)) {
+  plot <- plot_list_umiftlog[[i]] +
+    geom_hline(yintercept = c(UMI_lower[i], UMI_upper[i]), color = "blue4") +
+    geom_hline(yintercept = c(Feature_lower[i], Feature_upper[i]), color = "red2")
+  plot_list_umiftlog_limits[[i]] = plot
+}
+
+names(plot_list_umiftlog_limits) <- ids
+
+print(plot_list_umiftlog_limits)
+
+for (i in 1:length(plot_list_umiftlog_limits)) {
+  file_name = paste("UMIfeature_distribution_plot_log_", ids[i], ".tiff", sep="")
+  tiff(file_name)
+  print(plot_list_umiftlog_limits[[i]])
+  dev.off() # stop making the .tiff file
+}
+
+plot_list_umiftuntransformed_limits = list()
+
+for (i in 1:length(plot_list_umiftuntransformed)) {
+  plot <- plot_list_umiftuntransformed[[i]] +
+    geom_hline(yintercept = c(UMI_lower[i], UMI_upper[i]), color = "blue4") +
+    geom_hline(yintercept = c(Feature_lower[i], Feature_upper[i]), color = "red2")
+  plot_list_umiftuntransformed_limits[[i]] = plot # save your plot to the list
+}
+
+names(plot_list_umiftuntransformed_limits) <- ids
+
+print(plot_list_umiftuntransformed_limits)
+
+# Now let's save each of the plots as a .tiff file
+for (i in 1:length(plot_list_umiftuntransformed_limits)) {
+  file_name = paste("UMIfeature_distribution_plot_untransformed_", ids[i], ".tiff", sep="")
+  tiff(file_name)
+  print(plot_list_umiftuntransformed_limits[[i]])
+  dev.off()
+}
+
+
+plot_list_umiftuntransformed_first1000_limits = list()
+
+for (i in 1:length(plot_list_umiftuntransformed_first1000)) {
+  plot <- plot_list_umiftuntransformed_first1000[[i]] +
+    geom_hline(yintercept = c(UMI_lower[i], UMI_upper[i]), color = "blue4") +
+    geom_hline(yintercept = c(Feature_lower[i], Feature_upper[i]), color = "red2")
+  plot_list_umiftuntransformed_first1000_limits[[i]] = plot
+}
+
+names(plot_list_umiftuntransformed_first1000_limits) <- ids
+
+print(plot_list_umiftuntransformed_first1000_limits)
+
+for (i in 1:length(plot_list_umiftuntransformed_first1000_limits)) {
+  file_name = paste("UMIfeature_distribution_plot_untransformed_first1000_", ids[i], ".tiff", sep="")
+  tiff(file_name)
+  print(plot_list_umiftuntransformed_first1000_limits[[i]])
+  dev.off()
+}
+
+FeatureUMIplots <- cowplot::plot_grid(
+  plot_list_umiftlog_limits[[1]], plot_list_umiftuntransformed_limits[[1]], plot_list_umiftuntransformed_first1000_limits[[1]],
+  plot_list_umiftlog_limits[[2]], plot_list_umiftuntransformed_limits[[2]], plot_list_umiftuntransformed_first1000_limits[[2]],
+  ncol = 2,
+  nrow = 2
+)
+
+# Save these plots
+pdf(file = "DistributionsofFeaturesandUMIs.pdf",
+    useDingbats=FALSE,
+    width = 20,
+    height = 10)
+FeatureUMIplots
+dev.off()
+
+plot_list_scatter = list()
+
+for (i in 1:length(ids)) {
+
+  datatoplot <- subset(SC, subset = sample  == ids[i])
+  
+  pl1 <- FeatureScatter(datatoplot, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", group.by = "sample") +
+    ggtitle(paste("UMI and Features for", ids[i], sep=" ")) +
+    geom_hline(yintercept = c(Feature_lower[i], Feature_upper[i])) + geom_vline(xintercept = c(UMI_lower[i], UMI_upper[i]))
+
+  plot_list_scatter[[i]] = pl1 #add the figure to the list
+}
+
+names(plot_list_scatter) <- ids
+
+print(plot_list_scatter)
+
+for (i in 1:length(plot_list_scatter)) {
+  file_name = paste("UMIfeature_scatterplot_", ids[i], ".tiff", sep="")
+  tiff(file_name)
+  print(plot_list_scatter[[i]])
+  dev.off()
+}
+```
+### Filter Cells by UMI/Feature Counts
+
+So once you're happy with your filters that you've noted above then we can apply them to our data
+```{r filter cells by UMI/feature counts}
+# Set your limits, THESE MUST BE ALTERED TO SUIT YOUR SAMPLES!!
+#SAMPLE 1
+UMI_upper_sample1 <- 80000
+UMI_lower_sample1 <- 1000
+Feature_upper_sample1 <- 7000
+Feature_lower_sample1 <- 1500
+
+#SAMPLE 2
+UMI_upper_sample2 <- 80000
+UMI_lower_sample2 <- 1000
+Feature_upper_sample2 <- 7000
+Feature_lower_sample2 <- 1750
+
+SC.SCsample1 <- subset(SC, subset = sample  == "GM-M2" & nFeature_RNA > Feature_lower_sample1 & nFeature_RNA < Feature_upper_sample1 & nCount_RNA > UMI_lower_sample1 & nCount_RNA < UMI_upper_sample1)
+SC.SCsample2 <- subset(SC, subset = sample == "GM-M3" & nFeature_RNA > Feature_lower_sample2 & nFeature_RNA < Feature_upper_sample2 & nCount_RNA > UMI_lower_sample2 & nCount_RNA < UMI_upper_sample2)
+
+SC <- merge(SC.SCsample1, y = c(SC.SCsample2), add.cell.ids = c("SC_sample1", "SC_sample2"), project = "SC")
+
+table(SC$sample)
+
+cellspersampletable <-table(SC$sample)
+write.table(cellspersampletable, file = "cellspersampleaftermtandhardfilters")
+
+```
+
+### Get list of cell cycle marker genes for your study organism
+
+```{r cell cycle markers for study organism}
+cellcyclegenesRabbit <- read.csv("cellcyclegenesRabbit_2.csv", stringsAsFactors = FALSE, sep=";")
+
+head(cellcyclegenesRabbit)
+
+# Pull out S phase genes
+S.genes <- cellcyclegenesRabbit %>% dplyr::filter(Cycle == "S.gene") %>% dplyr::select(Ensembl_Symbol) %>% pull(Ensembl_Symbol) # note that the "pull" converts the identified column to a vector, handy!
+S.genes
+# Pull out the G2M phase genes
+G2M.genes <- cellcyclegenesRabbit %>% dplyr::filter(Cycle == "G2M.gene") %>% dplyr::select(Ensembl_Symbol) %>% pull(Ensembl_Symbol)
+G2M.genes
+```
+
+
+### Normalize Data
+
+```{r normalizedata normalization}
+# split the dataset into a list of of seurat objects (one for each sample)
+SC.list <- SplitObject(SC, split.by = "sample")
+SC.list <- lapply(X = SC.list, FUN = function(x) {
+  x <- NormalizeData(x)
+})
+```
+### Cell Cycle Scores
+
+```{r cell cycle scoring}
+# Now we're going to assign each nuclei to a cell cycle stage based on their expression of the S.genes and the G2M.genes
+SC.list <- lapply(X = SC.list, FUN = function(x) {
+  x <- CellCycleScoring(object = x,
+                        g2m.features = G2M.genes,
+                        s.features = S.genes,
+                        set.ident = TRUE,
+                        assay = 'RNA')
+})
+
+head(SC.list[["GM-M2"]][[]])
+head(SC.list[["GM-M3"]][[]])
+
+```
+## Dataset integration
+
+### SCTransform normalization
+```{r SCTransform normalization 2 regressing out cell cycle stage}
+table1 <- lapply(X = SC.list, FUN = function(x) {
+  x <- SCTransform(x,
+                   vst.flavor = "v2",
+                   conserve.memory = TRUE,
+                   vars.to.regress = c("S.Score", "G2M.Score"),
+                   variable.features.n = "all",
+                   method = "glmGamPoi",
+                   assay = "RNA",
+                   new.assay.name = "SCT")
+})
+```
+
+```{r Sanity Check for Default Assay 2}
+DefaultAssay(object = table1[["GM-M2"]])
+DefaultAssay(object = table1[["GM-M3"]])
+
+```
+
+### Identifying Cell Clusters in Each Sample
+
+```{r identify cell clusters in each sample, message = FALSE}
+
+table1 <-lapply(X = table1, FUN = function(x) {
+  x <- RunPCA(x, dims = 1:50)
+})
+```
+```{r }
+lapply(seq_along(table1), FUN = function(x) {
+  ElbowPlot(table1[[x]], ndim = 50) +
+    ggtitle(names(table1)[x])
+})
+
+```
+
+```{r }
+
+# 3. Make a UMAP
+# Now we need to run the UMAP for each of our samples using the number of PCs we thought was appropriate from our Elbowplot
+table1 <- lapply(X = table1, FUN = function(x) {
+  x <- RunUMAP(x, dims = 1:20) # This changes based on number of PCs appropriate from Elbowplot
+})
+```
+
+```{r }
+# 4. Cluster cells
+table1 <- lapply(X = table1, FUN = function(x) {
+  x <- FindNeighbors(x, dims = 1:20)
+})
+```
+```{r }
+table1 <- lapply(X = table1, FUN = function(x) {
+  x <- FindClusters(x, resolution = 0.5) # Potentially play with "resolution = 0.5"
+})
+```
+```{r }
+lapply(X = table1, FUN = function(x) {
+DimPlot(x, reduction = "umap", split.by = "sample", label = TRUE, pt.size = 0.1) + NoLegend()
+})
+```
+
+### DoubletFinder
+
+```{r clean up memory before doubletfinder}
+# Clean up memory
+rm(list=setdiff(ls(), "table1"))
+```
+
+```{r doubletfinder simulate best parameters, message = FALSE, results = 'hide'}
+sweep.res.list_SC<- lapply(X = table1, FUN = function(x) {
+  x <- paramSweep_v3(x, PCs = 1:20, sct = TRUE)
+})
+```
+
+```{r }
+sweep.stats.list_SC <- lapply(X = sweep.res.list_SC, FUN = function(x) {
+  x <- summarizeSweep(x, GT = FALSE)
+})
+```
+```{r }
+bcmvn.list_SC <- lapply(X = sweep.stats.list_SC, FUN = function(x) {
+  x <- find.pK(x)
+})
+
+bcmvn.list_SC <- lapply(X = bcmvn.list_SC, FUN = function(x) {
+  x$pK <- as.numeric(as.character(x$pK))
+  return(x)
+})
+```
+
+```{r doubletfinder choose best pK value}
+
+lapply(seq_along(bcmvn.list_SC), FUN = function(x) {
+ ggplot(bcmvn.list_SC[[x]], aes(pK, BCmetric)) +
+    geom_point() +
+    ggtitle(names(bcmvn.list_SC)[x])
+})
+
+pK <- lapply(X = bcmvn.list_SC, FUN = function(x) {
+  x %>% dplyr::filter(BCmetric == max(BCmetric)) %>% dplyr::select(pK) %>% pull(pK)
+})
+```
+
+```{r doubletfinder find doublets, message = FALSE, results = 'hide'}
+nExp_poi <- lapply(X = table1, FUN = function(x) {
+  x <- round(0.04*nrow(x@meta.data))  ## Assuming 4% doublet formation rate - tailor for your dataset
+})
+```
+
+```{r }
+# Homotypic Doublet Proportion Estimate
+homotypic.prop <- lapply(X = table1, FUN = function(x) {
+  x <- modelHomotypic(x@meta.data$seurat_clusters)
+})
+```
+
+```{r }
+# Now we're going to estimate the number of heterotypic doublets in each of our samples by multiplying the number of doublets we expect (given Poisson distribution) by 1 - the proportion of expected homotypic doublets (as calculated above), and then round the results.
+
+nExp_poi.adj <- mapply(function(x,y) round(x*(1-y)), x = nExp_poi, y = homotypic.prop, SIMPLIFY = FALSE)
+```
+
+```{r }
+# Run DoubletFinder with varying classification stringencies
+table1 <- mapply(function(x,y,z) doubletFinder_v3(x, PCs = 1:20, pN = 0.25, pK = y, nExp = z, reuse.pANN = FALSE, sct = TRUE), x = table1, y = pK, z = nExp_poi)
+
+pANN_name <- lapply(X = table1, FUN = function(x) {
+  x <- rev(names(x@meta.data))[2]
+})
+```
+
+```{r  }
+# Now we run doubletfinder again, but we don't need to calculate our pANN scores again, just use the ones we calculated already by setting reuse.pANN to the column of the metadata for each sample which has the pANN scores (as denoted by vector pANN_name). Then we can use all the same parameters as before but set the number of expected doublets this time (nExp) to that calculated after adjusting for homotypic doublets (nExp_poi.adj)
+table1 <- mapply(function(x,y,z,w) doubletFinder_v3(x, PCs = 1:20, pN = 0.25, pK = y, nExp = z, reuse.pANN = w, sct = TRUE), x = table1, y = pK, z = nExp_poi.adj, w = pANN_name)
+
+#Quick sanity check, let's make sure the number of doublets identified in the metadata matches the number expected based on nExp_poi.adj
+
+test <- lapply(X = table1, FUN = function(x) {
+  x <- x@meta.data %>%
+    select(tail(names(.), 1)) %>%
+    table()
+})
+```
+
+```{r }
+Doublet_name <- lapply(X = table1, FUN = function(x) {
+  x <- rev(names(x@meta.data))[1]
+})
+
+table1 <- lapply(X = table1, FUN = function(x) {
+  names(x@meta.data)[ncol(x@meta.data)] <- "Homo_Adj_Doub_Ass"; # take the names of the columns of the metadata, and specify the column number equal to the number of columns in the metadata (i.e. the last column), and we're going to name this column now "Homo_Adj_Doub_Ass"
+  x # now print out the data for each sample and save to table1
+})
+```
+
+```{r doubletfinder plot results and filter}
+
+lapply(seq_along(table1), FUN = function(x) {
+ DimPlot(table1[[x]], reduction = "umap", group.by = "Homo_Adj_Doub_Ass", label = TRUE, pt.size = 0.1) + NoLegend() +
+    ggtitle(names(table1)[x]) # title the plots by sample (the name of each list of BCmvn values)
+})
+
+SC.list_NoDoublets <- lapply(X = table1, FUN = function(x) {
+  subset(x, subset = Homo_Adj_Doub_Ass == "Singlet")
+})
+```
+
+```{r doubletfinder sanity check}
+test
+lapply(X = SC.list_NoDoublets, FUN = function(x) {
+  x <- nrow(x@meta.data)
+})
+```
+
+```{r }
+saveRDS(SC.list_NoDoublets, file = "SC.list_NoDoublets.rds")
+```
+
+```{r }
+SC.list_NoDoublets <- readRDS("SC.list_NoDoublets.rds")
+```
+
+
+
+### Integration
+
+```{r clean up memory before integration}
+                 
+rm(list=setdiff(ls(), "SC.list_NoDoublets"))
+```
+
+```{r Integrated feature selection, message = FALSE}
+# select features that are repeatedly variable across datasets for integration
+# note that nfeatures tells you how many features to include in analysis (default is 2000)
+# note also that we need to specify we used SCT as our normalization method
+features <- SelectIntegrationFeatures(object.list = SC.list_NoDoublets, nfeatures = 5000, normalization.method = "SCT")
+```
+
+```{r prepare for integration and find anchors, message = FALSE}
+SC.list_NoDoublets <- PrepSCTIntegration(object.list = SC.list_NoDoublets, anchor.features = features)
+anchors <- FindIntegrationAnchors(object.list = SC.list_NoDoublets, anchor.features = features, normalization.method = "SCT", reduction = "rpca")
+```
+
+```{r Integration, message = FALSE}
+SC.integrated <- IntegrateData(anchorset = anchors, normalization.method = "SCT")
+DefaultAssay(SC.integrated) <- "integrated"
+```
+
+### Dimensionality reduction and clustering
+
+
+```{r clean up memory before cell clustering again}
+rm(list=setdiff(ls(), "SC.integrated"))
+```
+
+```{r dimensionality reduction, message = FALSE}
+SC.integrated <- RunPCA(SC.integrated, dims = 1:50)
+```
+
+```{r dimensionality reduction visualization}
+print(SC.integrated[["pca"]], dims = 1:5, nfeatures = 5)
+
+VizDimLoadings(SC.integrated, dims = 1:2, reduction = "pca")
+
+DimPlot(SC.integrated, reduction = "pca", group.by = "sample")
+
+DimHeatmap(SC.integrated, dims = 1, cells = 500, balanced = TRUE) # balanced = TRUE means you should plot an equal number of genes with both + and - scores, cells = 500 means plot the top 500 cells for this dimension
+
+DimHeatmap(SC.integrated, dims = 1:15, cells = 500, balanced = TRUE)
+
+# Check how many PCs you need with an Elbowplot
+ElbowPlot(SC.integrated, ndim = 50)
+SC.integrated <- RunUMAP(SC.integrated, dims = 1:20, verbose = FALSE)
+
+# Have a look at the UMAP
+DimPlot(SC.integrated, reduction = "umap", group.by = "sample")
+
+# Cluster cells
+SC.integrated <- FindNeighbors(SC.integrated, dims = 1:20)
+SC.integrated <- FindClusters(SC.integrated, resolution = 0.5) ###Potentially play with "resolution = 0.5"
+```
+
+```{r plot UMAPs, message = FALSE}
+#You can save the object at this point so that it can easily be loaded back in without having to rerun the computationally intensive steps performed above, or easily shared with collaborators.
+saveRDS(SC.integrated, file = "SC.integrated.rds")
+
+# Plot UMAP with clusters in a legend
+png("UMAP_clusters.png", res=600, width=4200, height=3200)
+DimPlot(SC.integrated , reduction = "umap", pt.size = 0.1)
+dev.off()
+
+# Plot UMAP with clusters labeled on the plot
+png("UMAP_clusters_names_on_cells.png", res=600, width=4200, height=3200)
+DimPlot(SC.integrated, reduction = "umap", label = TRUE, pt.size = 0.1) + NoLegend()
+dev.off()
+
+# Plot UMAP with cells coloured by sample origin
+png("UMAP_origin.png", res=600, width=4200, height=3200)
+DimPlot(SC.integrated, group.by = "sample", pt.size = 0.1)
+dev.off()
+
+# Plot UMAP with clusters in a legend for each sample
+png("UMAP_clusters_separated_origin.png", res=600, width=6200, height=3200)
+DimPlot(SC.integrated, reduction = "umap", split.by = "sample", pt.size = 0.1)
+dev.off()
+
+# Plot UMAP with clusters labeled on the plot for each sample
+png("UMAP_clusters_separated_origin_names_on_cells.png", res=600, width=6200, height=3200)
+DimPlot(SC.integrated, reduction = "umap", split.by = "sample", label = TRUE, pt.size = 0.1) + NoLegend()
+dev.off()
+
+# Plot UMAP with cells coloured by cell cycle stage
+png("UMAP_cellcycle.png", res=600, width=4200, height=3200)
+DimPlot(SC.integrated, group.by = "Phase", pt.size = 0.1)
+dev.off()
+```
+
+# Getting Your Data
+
+## Setting up R Environment
+
+### Setup
+
+```{r SetUp}
+options(scipen=999)
+set.seed(42)
+```
+```{r }
+setwd("YOUR PATH")
+```
+### Load Packages
+Now load up all of the packages you'll need for this analysis
+
+```{r load packages}
+# Load up libraries
+library(Seurat) # to run single cell analyses
+library(ggplot2) # to make plots
+library(dplyr) # to manipulate data frames
+library(cowplot) # to arrange plots in a grid
+library(data.table) # to use %like%
+library(glmGamPoi) # helps to speed up SCTransform step
+library("DoubletFinder") # to detect doublets in our dataset
+```
+### Load Data
+```{r load rds}
+SC.integrated <- readRDS("SC.integrated.rds")
+```
+### Set Default Assay
+```{r set default assay}
+# For performing differential expression after integration, we switch back to the SCT data
+# https://github.com/satijalab/seurat/issues/1534
+# https://satijalab.org/seurat/articles/integration_introduction.html
+DefaultAssay(SC.integrated) <- "SCT"
+```
+## Find Markers
+
+```{r Differential Expression}
+SC.integrated <- PrepSCTFindMarkers(SC.integrated, assay = "SCT")
+SC.markers <- FindAllMarkers(SC.integrated, assay = "SCT", slot = "data", only.pos = TRUE, min.pct = 0.25, return.thresh = 0.01, pseudocount.use = 0.001, logfc.threshold = 0.25, test.use = "LR", latent.vars = "sample")
+write.table(SC.markers, file="DE_SC.txt", sep="\t")
+saveRDS(SC.integrated, file = "SC.integrated.rds")
+```
+### CLUSTER CHECK ####
+## Filtering based on number of genes (features) and molecules (UMI) per cell
+
+### Violin Plot visualization of features and UMIs
+```{r Violin Plot visualization of features and UMIs}
+# Visualize QC metrics as a violin plot
+VlnPlot(object = SC.integrated, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2
+        , pt.size = 0, group.by = "sample"
+        )
+# set pt.size to 0 to see the violins!
+
+# Can be easier to see if you do them one by one:
+VlnPlot(object = SC.integrated, features = c("nFeature_RNA"), group.by = "sample")
+VlnPlot(object = SC.integrated, features = c("nCount_RNA"),group.by = "sample")
+```
+### Scatterplot visualization of features and UMIs
+```{r Scatterplot visualization of features and UMIs}
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+scatterplot <- FeatureScatter(SC.integrated, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", raster=FALSE, group.by = "sample")
+
+scatterplot
+```
+### Ridgeplot visualization of features and UMIs
+```{r Ridgeplot visualization of features and UMIs}
+RidgePlot(SC.integrated, features=c("nFeature_RNA","nCount_RNA"), ncol = 2, group.by = "sample") + # set ncol to number of plots you want in each row
+geom_vline(xintercept = c(10), color = "purple") # add a vertical line at 10% mtDNA percentage, can be changed as required. 
+```
+
+
+```{r }
+VlnPlot(SC.integrated, features = c("nFeature_RNA","nCount_RNA","percent.mt"), group.by = "seurat_clusters")
+```
+
+```{r }
+SC.integrated@meta.data %>%
+  group_by(seurat_clusters) %>%
+  summarise(mean_nFeature = median(nFeature_RNA),
+            mean_nCount   = median(nCount_RNA),
+            mean_percentMT = median(percent.mt))
+```
+
+```{r }
+DimPlot(SC.integrated, group.by = "seurat_clusters", label = TRUE)
+
+
+```
+
+
+```{r session info}
+sessionInfo()
+```
+
+
+
+
+#Removing Bad Clusters
+
+
+# Getting Your Data
+
+## Setting up R Environment
+
+### Setup
+```{r setup}
+options(scipen=999)
+set.seed(42)
+```
+
+#Path were files are kept
+```{r}
+setwd("YOUR PATH")
+```
+### Load Packages
+Now load up all of the packages you'll need for this analysis
+
+```{r load packages}
+# Load up libraries
+library(Seurat) # to run single cell analyses
+library(ggplot2) # to make plots
+library(dplyr) # to manipulate data frames
+library(cowplot) # to arrange plots in a grid
+library(data.table) # to use %like%
+library(glmGamPoi) # helps to speed up SCTransform step
+library("DoubletFinder") # to detect doublets in our dataset
+```
+
+### Load Data
+
+```{r load rds}
+SC.integrated <- readRDS("SC.integrated.rds")
+```
+
+### Remove troublesome clusters
+
+```{r remove bad clusters}
+SC.integrated_2 <- subset(SC.integrated, idents = c(6), invert = TRUE) # we are removing cluster 6 because it has very low average UMI/feature counts in comparison to other clusters.
+# Please note that bad clusters were removed sequentially and this file was rerun each time a new cluster was removed.
+```
+
+### Set Default Assay
+
+```{r set default assay}
+# We're redoing sctransform so use the RNA assay
+DefaultAssay(SC.integrated_2) <- "RNA"
+```
+
+### SCTransform normalization
+```{r SCTransform normalization}
+# split the dataset into a list of of seurat objects (one for each sample)
+SC.list <- SplitObject(SC.integrated_2, split.by = "sample")
+SC.list <- lapply(X = SC.list, FUN = function(x) {
+  x <- SCTransform(x,
+                   vst.flavor = "v2",
+                   conserve.memory = TRUE,
+                   vars.to.regress = c("S.Score", "G2M.Score"), # could also regress on "percent.mt" if you hadn't removed these genes
+                   variable.features.n = "all",
+                   method = "glmGamPoi",
+                   assay = "RNA",
+                   new.assay.name = "SCT") # this should overwrite the current SCT assay
+})
+```
+```{r Sanity Check for Default Assay after SCTransform}
+DefaultAssay(object = SC.integrated_2)
+```
+
+### Identifying Cell Clusters in Each Sample
+
+```{r identify cell clusters in each sample, message = FALSE}
+# 1. Linear dimension reduction
+# Run PCA for all of your samples individually with 50 PCs
+SC.list <-lapply(X = SC.list, FUN = function(x) {
+  x <- RunPCA(x, dims = 1:50)
+})
+```
+
+### Integration
+
+```{r clean up memory before integration}
+rm(list=setdiff(ls(), "SC.list"))
+```
+```{r Integrated feature selection, message = FALSE} 
+features <- SelectIntegrationFeatures(object.list = SC.list, nfeatures = 2000, normalization.method = "SCT")
+```
+
+```{r prepare for integration and find anchors, message = FALSE}
+SC.list <- PrepSCTIntegration(object.list = SC.list, anchor.features = features)
+anchors <- FindIntegrationAnchors(object.list = SC.list, anchor.features = features, normalization.method = "SCT", reduction = "rpca")
+```
+
+```{r Integration, message = FALSE}
+SC.integrated_2 <- IntegrateData(anchorset = anchors, normalization.method = "SCT")
+DefaultAssay(SC.integrated_2) <- "integrated"
+```
+## Dimensionality reduction and clustering
+
+Now that we've integrated our data, it's time to look for cell clusters again!
+
+We need to repeat the steps we did for each individual sample for the newly integrated dataset:
+1. Generate a PCA
+2. Select the best number of dimensions (PCs) to be used going forward by consulting an Elbowplot of PCs from PCA
+3. Generate a UMAP
+4. Cluster Cells
+
+```{r dimensionality reduction, message = FALSE}
+SC.integrated_2 <- RunPCA(SC.integrated_2, dims = 1:50)
+```
+
+```{r dimensionality reduction visualization}
+print(SC.integrated_2[["pca"]], dims = 1:5, nfeatures = 5)
+VizDimLoadings(SC.integrated_2, dims = 1:2, reduction = "pca")
+DimPlot(SC.integrated_2, reduction = "pca", group.by = "sample")
+DimHeatmap(SC.integrated_2, dims = 1, cells = 500, balanced = TRUE) # balanced = TRUE means you should plot an equal number of genes with both + and - scores, cells = 500 means plot the top 500 cells for this dimension
+DimHeatmap(SC.integrated_2, dims = 1:15, cells = 500, balanced = TRUE)
+
+ElbowPlot(SC.integrated_2, ndim = 50)
+SC.integrated_2 <- RunUMAP(SC.integrated_2, dims = 1:20, verbose = FALSE)
+
+DimPlot(SC.integrated_2, reduction = "umap", group.by = "sample")
+SC.integrated_2 <- FindNeighbors(SC.integrated_2, dims = 1:30)
+SC.integrated_2 <- FindClusters(SC.integrated_2, resolution = 0.5) ###Potentially play with "resolution = 0.5"
+```
+
+```{r plot UMAPs, message = FALSE}
+saveRDS(SC.integrated_2, file = "ORYCUN.rds")
+
+# Plot UMAP with clusters in a legend
+png("UMAP_clusters_filter.png", res=600, width=4200, height=3200)
+DimPlot(SC.integrated_2, reduction = "umap", pt.size = 0.1)
+dev.off()
+
+# Plot UMAP with clusters labeled on the plot
+png("UMAP_clusters_names_on_cells_filter.png", res=600, width=4200, height=3200)
+DimPlot(SC.integrated_2, reduction = "umap", label = TRUE, pt.size = 0.1) + NoLegend()
+dev.off()
+
+# Plot UMAP with cells coloured by sample origin
+png("UMAP_origin_filter.png", res=600, width=4200, height=3200)
+DimPlot(SC.integrated_2, group.by = "sample", pt.size = 0.1)
+dev.off()
+
+# Plot UMAP with clusters in a legend for each sample
+png("UMAP_clusters_separated_origin_filter.png", res=600, width=6200, height=3200)
+DimPlot(SC.integrated_2, reduction = "umap", split.by = "sample", pt.size = 0.1)
+dev.off()
+
+# Plot UMAP with clusters labeled on the plot for each sample
+png("UMAP_clusters_separated_origin_names_on_cells_filter.png", res=600, width=6200, height=3200)
+DimPlot(SC.integrated_2, reduction = "umap", split.by = "sample", label = TRUE, pt.size = 0.1) + NoLegend()
+dev.off()
+
+# Plot UMAP with cells coloured by cell cycle stage
+png("UMAP_cellcycle_filter.png", res=600, width=4200, height=3200)
+DimPlot(SC.integrated_2, group.by = "Phase", pt.size = 0.1)
+dev.off()
+```
+
+```{r session info}
+sessionInfo()
+```
+
+
+# Getting Your Data
+
+## Setting up R Environment
+
+### Setup
+```{r setup}
+set.seed(42)
+```
+```{r}
+setwd("YOUR PATH")
+```
+
+### Load Packages
+
+Now load up all of the packages you'll need for this analysis
+
+```{r load packages}
+# Load up libraries
+library(Seurat) # to run single cell analyses
+library(ggplot2) # to make plots
+library(dplyr) # to manipulate data frames
+library(cowplot) # to arrange plots in a grid
+library(data.table) # to use %like%
+library(glmGamPoi) # helps to speed up SCTransform step
+library("DoubletFinder") # to detect doublets in our dataset
+```
+
+### Load Data
+
+```{r load rds}
+SC.integrated <- readRDS("ORYCUN.rds")
+```
+
+### Set Default Assay
+
+```{r set default assay}
+# For performing differential expression after integration, we switch back to the SCT data
+DefaultAssay(SC.integrated_2) <- "SCT"
+```
+
+## Find Markers
+
+```{r Differential Expression}
+SC.integrated_2 <- PrepSCTFindMarkers(SC.integrated_2, assay = "SCT")
+SC.markers <- FindAllMarkers(SC.integrated_2, assay = "SCT", slot = "data", only.pos = TRUE, min.pct = 0.25, return.thresh = 0.01, pseudocount.use = 0.001, logfc.threshold = 0.25, test.use = "LR", latent.vars = "sample")
+
+write.table(SC.markers, file="DE_SC.txt", sep="\t")
+saveRDS(SC.integrated_2, file = "SC.integrated_2.rds")
+```
+
+```{r }
+library(openxlsx)
+write.xlsx(SC.markers, file = "DE_SC.xlsx")
+```
+
+
+```{r session info}
+sessionInfo()
+```
+
+CODE MODIFIED FROM: https://github.com/Roslin-Aquaculture/SHARK_retina
